@@ -38,7 +38,7 @@ type Clip = {
   title: string;
   game: string;
   thumbnail?: string;
-  user?: string;
+  user?: string; // display name only (no email)
   userId?: string;
   createdAt?: any;
   likedBy: string[];
@@ -81,6 +81,19 @@ const formatTimeAgo = (createdAt: any) => {
   }
 };
 
+// helper to make sure we never show an email as a username
+const getSafeDisplayName = (rawUser?: string, username?: string): string => {
+  if (username && username.trim().length > 0) return username.trim();
+  if (
+    rawUser &&
+    rawUser.trim().length > 0 &&
+    !rawUser.includes("@") // very simple "looks like email" check
+  ) {
+    return rawUser.trim();
+  }
+  return "player";
+};
+
 export default function FeedScreen() {
   const [clips, setClips] = useState<Clip[]>([]);
   const [game, setGame] = useState("");
@@ -111,12 +124,15 @@ export default function FeedScreen() {
     const unsub = onSnapshot(q, (snap) => {
       const data: Clip[] = snap.docs.map((docSnap) => {
         const d = docSnap.data() as any;
+
+        const displayName = getSafeDisplayName(d.user, d.username);
+
         return {
           id: docSnap.id,
           title: d.title ?? "",
           game: d.game ?? "",
           thumbnail: d.thumbnail,
-          user: d.user ?? d.username ?? d.userEmail ?? "unknown",
+          user: displayName, // safe display name only
           userId: d.userId,
           createdAt: d.createdAt,
           likedBy: Array.isArray(d.likedBy) ? d.likedBy : [],
@@ -144,13 +160,29 @@ export default function FeedScreen() {
       thumbnail.trim() ||
       "https://placehold.co/600x400/111827/FFFFFF?text=No+Thumbnail";
 
+    // fetch username from /users doc; if none, fall back to "player"
+    let username: string | null = null;
+    try {
+      const ref = doc(db, "users", currentUser.uid);
+      const snap = await getDoc(ref);
+      if (snap.exists()) {
+        const data = snap.data() as any;
+        if (data.username) username = String(data.username);
+      }
+    } catch (e) {
+      console.log("Could not fetch profile for post.");
+    }
+
+    const displayName = getSafeDisplayName(undefined, username || undefined);
+
     try {
       setPosting(true);
       await addDoc(collection(db, "clips"), {
         title: title.trim(),
         game: game.trim(),
         thumbnail: finalThumbnail,
-        user: currentUser.email,
+        user: displayName, // store display name only
+        username: displayName, // keep a username field too
         userId: currentUser.uid,
         createdAt: serverTimestamp(),
         likedBy: [],
@@ -203,7 +235,7 @@ export default function FeedScreen() {
         return {
           id: d.id,
           userId: c.userId,
-          username: c.username ?? c.userEmail ?? "unknown",
+          username: c.username ?? "player", // no email fallback
           text: c.text,
           createdAt: c.createdAt,
         };
@@ -242,18 +274,19 @@ export default function FeedScreen() {
         const snap = await getDoc(ref);
         if (snap.exists()) {
           const data = snap.data() as any;
-          if (data.username) username = data.username;
+          if (data.username) username = String(data.username);
         }
       } catch (e) {
-        console.log("Could not fetch profile for comment, using email.");
+        console.log("Could not fetch profile for comment.");
       }
+
+      const safeName = getSafeDisplayName(undefined, username || undefined);
 
       const commentsRef = collection(db, "clips", selectedClip.id, "comments");
 
       await addDoc(commentsRef, {
         userId: currentUser.uid,
-        userEmail: currentUser.email,
-        username,
+        username: safeName, // only store username
         text,
         createdAt: serverTimestamp(),
       });
@@ -264,7 +297,7 @@ export default function FeedScreen() {
         {
           id: `local-${Date.now()}`,
           userId: currentUser.uid,
-          username: username || "unknown",
+          username: safeName,
           text,
           createdAt: new Date(),
         },
@@ -298,8 +331,8 @@ export default function FeedScreen() {
 
       if (userSnap.exists()) {
         const data = userSnap.data() as any;
-        if (data.username) username = data.username;
-        if (data.platform) platform = data.platform;
+        if (data.username) username = String(data.username);
+        if (data.platform) platform = String(data.platform);
       }
 
       // their stats
@@ -419,7 +452,7 @@ export default function FeedScreen() {
             <Text style={styles.title}>{item.title}</Text>
             <View style={styles.cardFooter}>
               <TouchableOpacity onPress={() => openUserProfileModal(item.userId)}>
-                <Text style={styles.user}>@{item.user || "unknown"}</Text>
+                <Text style={styles.user}>@{item.user || "player"}</Text>
               </TouchableOpacity>
 
               <TouchableOpacity
@@ -535,7 +568,7 @@ export default function FeedScreen() {
                 <Text style={styles.modalGame}>{selectedClip.game}</Text>
                 <Text style={styles.modalTitle}>{selectedClip.title}</Text>
                 <Text style={styles.modalUser}>
-                  @{selectedClip.user || "unknown"}
+                  @{selectedClip.user || "player"}
                 </Text>
               </View>
 
