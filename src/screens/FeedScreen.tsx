@@ -38,7 +38,7 @@ type Clip = {
   title: string;
   game: string;
   thumbnail?: string;
-  user?: string;   // safe display name only
+  user?: string; // display name
   userId?: string;
   createdAt?: any;
   likedBy: string[];
@@ -47,7 +47,7 @@ type Clip = {
 type Comment = {
   id: string;
   userId: string;
-  username: string; // safe display name only
+  username: string;
   text: string;
   createdAt?: any;
 };
@@ -61,24 +61,21 @@ type PublicUserProfile = {
   isFollowing: boolean;
 };
 
-// ---- helpers --------------------------------------------------
+// ----- helpers -----
 
-// never show full emails as a display name
-const getSafeDisplayName = (rawUser?: string, username?: string): string => {
-  // pick a candidate from username or old "user" field
-  let candidate = (username || rawUser || "").trim();
-
+// use profile username if set, otherwise a masked email (before @)
+const getSafeDisplayName = (
+  username?: string | null,
+  email?: string | null
+): string => {
+  const candidate = (username || email || "").trim();
   if (!candidate) return "player";
 
-  // if it looks like an email, mask it (show only the part before "@")
   if (candidate.includes("@")) {
     const beforeAt = candidate.split("@")[0].trim();
-    if (beforeAt.length >= 3) {
-      return beforeAt; // e.g. "luisky720@gmail.com" → "luisky720"
-    }
+    if (beforeAt.length >= 3) return beforeAt;
     return "player";
   }
-
   return candidate;
 };
 
@@ -101,8 +98,6 @@ const formatTimeAgo = (createdAt: any) => {
     return "";
   }
 };
-
-// ----------------------------------------------------------------
 
 export default function FeedScreen() {
   const [clips, setClips] = useState<Clip[]>([]);
@@ -135,18 +130,14 @@ export default function FeedScreen() {
       const data: Clip[] = snap.docs.map((docSnap) => {
         const d = docSnap.data() as any;
 
-        // prefer username field, then fall back to old user / userEmail
-        const safeName = getSafeDisplayName(
-          d.user,
-          d.username ?? d.userEmail
-        );
+        const safeName = getSafeDisplayName(d.username, d.userEmail ?? d.user);
 
         return {
           id: docSnap.id,
           title: d.title ?? "",
           game: d.game ?? "",
           thumbnail: d.thumbnail,
-          user: safeName || "player",
+          user: safeName,
           userId: d.userId,
           createdAt: d.createdAt,
           likedBy: Array.isArray(d.likedBy) ? d.likedBy : [],
@@ -158,8 +149,7 @@ export default function FeedScreen() {
     return unsub;
   }, []);
 
-  // create clip --------------------------------------------------
-
+  // ---------- posting a clip, using profile username ----------
   const handlePost = async () => {
     if (!game || !title) {
       Alert.alert("Missing info", "Game and title are required.");
@@ -176,25 +166,29 @@ export default function FeedScreen() {
       thumbnail.trim() ||
       "https://placehold.co/600x400/111827/FFFFFF?text=No+Thumbnail";
 
-    // figure out a safe display name to store for this post
-    let displayName: string | undefined;
-
+    // get username from profile (users/{uid}.username)
+    let profileUsername: string | null = null;
     try {
-      const meRef = doc(db, "users", currentUser.uid);
-      const meSnap = await getDoc(meRef);
-      if (meSnap.exists()) {
-        const data = meSnap.data() as any;
-        if (data.username) {
-          displayName = getSafeDisplayName(undefined, String(data.username));
-        }
+      const userRef = doc(db, "users", currentUser.uid);
+      const snap = await getDoc(userRef);
+      if (snap.exists()) {
+        const data = snap.data() as any;
+        if (data.username) profileUsername = data.username;
+      } else {
+        // make sure user doc exists for follow system
+        await setDoc(
+          userRef,
+          { email: currentUser.email ?? null, createdAt: new Date() },
+          { merge: true }
+        );
       }
     } catch (e) {
-      console.log("Could not fetch profile for post display name.");
+      console.log("Could not fetch profile username, using email fallback.");
     }
 
-    const safeDisplayName = getSafeDisplayName(
-      displayName,
-      currentUser.email ?? currentUser.uid
+    const finalUsername = getSafeDisplayName(
+      profileUsername,
+      currentUser.email
     );
 
     try {
@@ -203,8 +197,10 @@ export default function FeedScreen() {
         title: title.trim(),
         game: game.trim(),
         thumbnail: finalThumbnail,
-        user: safeDisplayName,        // <- safe, no email
         userId: currentUser.uid,
+        userEmail: currentUser.email ?? null,
+        username: finalUsername, // profile username
+        user: finalUsername, // legacy field, but holds same display name
         createdAt: serverTimestamp(),
         likedBy: [],
       });
@@ -212,7 +208,7 @@ export default function FeedScreen() {
       setGame("");
       setTitle("");
       setThumbnail("");
-      setCreateVisible(false); // close sheet after posting
+      setCreateVisible(false);
     } catch (err: any) {
       console.log("Post error", err);
       Alert.alert("Error", err.message || "Could not post clip.");
@@ -221,8 +217,7 @@ export default function FeedScreen() {
     }
   };
 
-  // likes --------------------------------------------------------
-
+  // ---------- likes ----------
   const toggleLike = async (clip: Clip) => {
     const currentUser = auth.currentUser;
     if (!currentUser) {
@@ -244,8 +239,7 @@ export default function FeedScreen() {
     }
   };
 
-  // comments -----------------------------------------------------
-
+  // ---------- comments ----------
   const loadCommentsForClip = async (clipId: string) => {
     try {
       setCommentsLoading(true);
@@ -257,16 +251,11 @@ export default function FeedScreen() {
 
       const data: Comment[] = snap.docs.map((d) => {
         const c = d.data() as any;
-
-        const safeName = getSafeDisplayName(
-          undefined,
-          c.username ?? c.userEmail
-        );
-
+        const safeName = getSafeDisplayName(c.username, c.userEmail);
         return {
           id: d.id,
           userId: c.userId,
-          username: safeName || "player",
+          username: safeName,
           text: c.text,
           createdAt: c.createdAt,
         };
@@ -299,30 +288,29 @@ export default function FeedScreen() {
     try {
       setCommentSending(true);
 
-      let profileName: string | undefined;
-
+      let profileUsername: string | null = null;
       try {
         const ref = doc(db, "users", currentUser.uid);
         const snap = await getDoc(ref);
         if (snap.exists()) {
           const data = snap.data() as any;
-          if (data.username) profileName = String(data.username);
+          if (data.username) profileUsername = data.username;
         }
       } catch (e) {
-        console.log("Could not fetch profile for comment, using email.");
+        console.log("Could not fetch profile for comment.");
       }
 
-      const safeName = getSafeDisplayName(
-        undefined,
-        profileName ?? currentUser.email ?? currentUser.uid
+      const finalUsername = getSafeDisplayName(
+        profileUsername,
+        currentUser.email
       );
 
       const commentsRef = collection(db, "clips", selectedClip.id, "comments");
 
       await addDoc(commentsRef, {
         userId: currentUser.uid,
-        userEmail: currentUser.email, // can still be stored, but not shown
-        username: safeName,
+        userEmail: currentUser.email ?? null,
+        username: finalUsername,
         text,
         createdAt: serverTimestamp(),
       });
@@ -333,7 +321,7 @@ export default function FeedScreen() {
         {
           id: `local-${Date.now()}`,
           userId: currentUser.uid,
-          username: safeName,
+          username: finalUsername,
           text,
           createdAt: new Date(),
         },
@@ -347,8 +335,7 @@ export default function FeedScreen() {
     }
   };
 
-  // user profile bottom sheet ------------------------------------
-
+  // ---------- user modal (follow) ----------
   const openUserProfileModal = async (userId?: string) => {
     if (!userId) {
       Alert.alert("Unavailable", "User information not available for this clip.");
@@ -360,22 +347,23 @@ export default function FeedScreen() {
     setUserModalProfile(null);
 
     try {
-      // target user
       const userRef = doc(db, "users", userId);
       const userSnap = await getDoc(userRef);
 
-      let username = "Unknown player";
+      let rawUsername: string | null = null;
       let platform = "Unknown platform";
+      let email: string | null = null;
 
       if (userSnap.exists()) {
         const data = userSnap.data() as any;
-        if (data.username) {
-          username = getSafeDisplayName(undefined, String(data.username));
-        }
-        if (data.platform) platform = String(data.platform);
+        rawUsername = data.username ?? null;
+        platform = data.platform || platform;
+        email = data.email ?? null;
       }
 
-      // their stats
+      const username = getSafeDisplayName(rawUsername, email);
+
+      // stats
       const clipsQ = query(
         collection(db, "clips"),
         where("userId", "==", userId)
@@ -390,7 +378,7 @@ export default function FeedScreen() {
       const lfgSnap = await getDocs(lfgQ);
       const lfgCount = lfgSnap.size;
 
-      // is current user following them?
+      // following?
       let isFollowing = false;
       const currentUser = auth.currentUser;
       if (currentUser) {
@@ -423,7 +411,7 @@ export default function FeedScreen() {
   const handleToggleFollow = async () => {
     const currentUser = auth.currentUser;
     if (!currentUser || !userModalProfile) return;
-    if (currentUser.uid === userModalProfile.userId) return; // can't follow self
+    if (currentUser.uid === userModalProfile.userId) return;
 
     try {
       setFollowBusy(true);
@@ -433,18 +421,15 @@ export default function FeedScreen() {
 
       const newIsFollowing = !userModalProfile.isFollowing;
 
-      // ensure docs exist
       await setDoc(meRef, {}, { merge: true });
       await setDoc(targetRef, {}, { merge: true });
 
-      // update my "following"
       await updateDoc(meRef, {
         following: newIsFollowing
           ? arrayUnion(userModalProfile.userId)
           : arrayRemove(userModalProfile.userId),
       });
 
-      // update their "followers"
       await updateDoc(targetRef, {
         followers: newIsFollowing
           ? arrayUnion(currentUser.uid)
@@ -469,8 +454,7 @@ export default function FeedScreen() {
 
   const avatarSeed = userModalProfile?.username || "player";
 
-  // list item ----------------------------------------------------
-
+  // ---------- render each clip ----------
   const renderItem = ({ item }: { item: Clip }) => {
     const createdText = formatTimeAgo(item.createdAt);
     const isLiked =
@@ -518,8 +502,7 @@ export default function FeedScreen() {
     );
   };
 
-  // render -------------------------------------------------------
-
+  // ---------- UI ----------
   return (
     <KeyboardAvoidingView
       style={{ flex: 1, backgroundColor: "#050816" }}
@@ -536,7 +519,6 @@ export default function FeedScreen() {
           </TouchableOpacity>
         </View>
 
-        {/* Clips list */}
         <FlatList
           data={clips}
           keyExtractor={(item) => item.id}
@@ -547,7 +529,7 @@ export default function FeedScreen() {
           }
         />
 
-        {/* Bottom sheet: create post */}
+        {/* create post sheet */}
         <BottomSheet
           visible={createVisible}
           onClose={() => setCreateVisible(false)}
@@ -588,7 +570,7 @@ export default function FeedScreen() {
           </TouchableOpacity>
         </BottomSheet>
 
-        {/* Bottom sheet: clip fullscreen + comments */}
+        {/* clip + comments sheet */}
         <BottomSheet
           visible={!!selectedClip}
           onClose={closeClipModal}
@@ -670,7 +652,7 @@ export default function FeedScreen() {
           )}
         </BottomSheet>
 
-        {/* Bottom sheet: user profile */}
+        {/* user profile sheet */}
         <BottomSheet
           visible={userModalVisible}
           onClose={() => setUserModalVisible(false)}
@@ -748,8 +730,7 @@ export default function FeedScreen() {
   );
 }
 
-// ----------------------------------------------------------------
-
+// ---------- styles ----------
 const styles = StyleSheet.create({
   container: {
     flex: 1,

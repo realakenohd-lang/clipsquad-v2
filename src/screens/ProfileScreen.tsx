@@ -1,263 +1,386 @@
-// src/screens/ProfileScreen.tsx
-import React, { useEffect, useMemo, useState } from "react";
+import React, { useEffect, useState } from "react";
 import {
   View,
   Text,
-  TextInput,
-  TouchableOpacity,
   StyleSheet,
+  TouchableOpacity,
+  ActivityIndicator,
+  ScrollView,
+  TextInput,
+  KeyboardAvoidingView,
+  Platform,
   Alert,
   Image,
-  ScrollView,
 } from "react-native";
-import { auth, db } from "../../firebaseConfig";
 import {
   doc,
   getDoc,
   setDoc,
+  updateDoc,
   collection,
   getDocs,
   where,
   query,
 } from "firebase/firestore";
-import { signOut } from "firebase/auth";
+import { auth, db } from "../../firebaseConfig";
 import BottomSheet from "../components/BottomSheet";
 
+// ---------- helpers ----------
+
+// never show full emails as a display name
+const getSafeDisplayName = (username?: string, email?: string | null) => {
+  const candidate = (username || email || "").trim();
+  if (!candidate) return "player";
+
+  if (candidate.includes("@")) {
+    const beforeAt = candidate.split("@")[0].trim();
+    if (beforeAt.length >= 3) return beforeAt;
+    return "player";
+  }
+  return candidate;
+};
+
+type ProfileState = {
+  username: string;
+  platform: string;
+  favoriteGame: string;
+  region: string;
+  bio: string;
+  followersCount: number;
+  followingCount: number;
+  clipCount: number;
+  lfgCount: number;
+};
+
+const emptyProfile: ProfileState = {
+  username: "",
+  platform: "",
+  favoriteGame: "",
+  region: "",
+  bio: "",
+  followersCount: 0,
+  followingCount: 0,
+  clipCount: 0,
+  lfgCount: 0,
+};
+
 export default function ProfileScreen() {
-  const user = auth.currentUser;
-
-  const [username, setUsername] = useState("");
-  const [platform, setPlatform] = useState("");
-  const [bio, setBio] = useState("");
-  const [saving, setSaving] = useState(false);
-
-  const [followersCount, setFollowersCount] = useState(0);
-  const [followingCount, setFollowingCount] = useState(0);
-  const [clipCount, setClipCount] = useState(0);
-  const [lfgCount, setLfgCount] = useState(0);
-  const [likesReceived, setLikesReceived] = useState(0);
+  const [loading, setLoading] = useState(true);
+  const [profile, setProfile] = useState<ProfileState>(emptyProfile);
 
   const [editVisible, setEditVisible] = useState(false);
+  const [saving, setSaving] = useState(false);
 
-  const avatarSeed = useMemo(
-    () => username || user?.email || "player",
-    [username, user?.email]
-  );
+  // local edit fields
+  const [editUsername, setEditUsername] = useState("");
+  const [editPlatform, setEditPlatform] = useState("");
+  const [editFavoriteGame, setEditFavoriteGame] = useState("");
+  const [editRegion, setEditRegion] = useState("");
+  const [editBio, setEditBio] = useState("");
 
+  const user = auth.currentUser;
+
+  // -------- load profile + stats ----------
   useEffect(() => {
-    const loadProfileAndStats = async () => {
-      if (!user) return;
+    const load = async () => {
+      if (!user) {
+        setLoading(false);
+        return;
+      }
 
       try {
-        // basic profile
         const userRef = doc(db, "users", user.uid);
         const snap = await getDoc(userRef);
+
+        let username = "";
+        let platform = "";
+        let favoriteGame = "";
+        let region = "";
+        let bio = "";
+        let followersCount = 0;
+        let followingCount = 0;
+
         if (snap.exists()) {
           const data = snap.data() as any;
-          if (data.username) setUsername(data.username);
-          if (data.platform) setPlatform(data.platform);
-          if (data.bio) setBio(data.bio);
-          if (Array.isArray(data.followers)) {
-            setFollowersCount(data.followers.length);
-          }
-          if (Array.isArray(data.following)) {
-            setFollowingCount(data.following.length);
-          }
+          username = data.username || "";
+          platform = data.platform || "";
+          favoriteGame = data.favoriteGame || "";
+          region = data.region || "";
+          bio = data.bio || "";
+          followersCount = Array.isArray(data.followers)
+            ? data.followers.length
+            : 0;
+          followingCount = Array.isArray(data.following)
+            ? data.following.length
+            : 0;
+        } else {
+          // create a basic doc so follow system works later
+          await setDoc(userRef, {
+            email: user.email ?? null,
+            createdAt: new Date(),
+          });
         }
 
-        // clips + likes received
+        // stats based on content
         const clipsQ = query(
           collection(db, "clips"),
           where("userId", "==", user.uid)
         );
         const clipsSnap = await getDocs(clipsQ);
-        setClipCount(clipsSnap.size);
+        const clipCount = clipsSnap.size;
 
-        let likes = 0;
-        clipsSnap.forEach((d) => {
-          const data = d.data() as any;
-          const likedBy: string[] = Array.isArray(data.likedBy)
-            ? data.likedBy
-            : [];
-          likes += likedBy.length;
-        });
-        setLikesReceived(likes);
-
-        // LFG posts
         const lfgQ = query(
           collection(db, "lfgPosts"),
           where("userId", "==", user.uid)
         );
         const lfgSnap = await getDocs(lfgQ);
-        setLfgCount(lfgSnap.size);
+        const lfgCount = lfgSnap.size;
+
+        const newProfile: ProfileState = {
+          username,
+          platform,
+          favoriteGame,
+          region,
+          bio,
+          followersCount,
+          followingCount,
+          clipCount,
+          lfgCount,
+        };
+
+        setProfile(newProfile);
+
+        // fill edit fields
+        setEditUsername(username);
+        setEditPlatform(platform);
+        setEditFavoriteGame(favoriteGame);
+        setEditRegion(region);
+        setEditBio(bio);
       } catch (err) {
         console.log("Profile load error", err);
+        Alert.alert("Error", "Could not load profile.");
+      } finally {
+        setLoading(false);
       }
     };
 
-    loadProfileAndStats();
-  }, [user]);
+    load();
+  }, [user?.uid]);
 
-  const saveProfile = async () => {
+  // -------- save profile edits ----------
+  const handleSaveProfile = async () => {
     if (!user) return;
+
+    const trimmedUsername = editUsername.trim();
+    if (!trimmedUsername) {
+      Alert.alert("Missing username", "Please enter a username.");
+      return;
+    }
+
     try {
       setSaving(true);
+
+      const userRef = doc(db, "users", user.uid);
       await setDoc(
-        doc(db, "users", user.uid),
+        userRef,
         {
-          username: username.trim() || user.email,
-          platform: platform.trim(),
-          bio: bio.trim(),
+          username: trimmedUsername,
+          platform: editPlatform.trim(),
+          favoriteGame: editFavoriteGame.trim(),
+          region: editRegion.trim(),
+          bio: editBio.trim(),
+          email: user.email ?? null, // still stored, but NOT displayed
         },
         { merge: true }
       );
-      Alert.alert("Saved", "Profile updated.");
+
+      setProfile((prev) => ({
+        ...prev,
+        username: trimmedUsername,
+        platform: editPlatform.trim(),
+        favoriteGame: editFavoriteGame.trim(),
+        region: editRegion.trim(),
+        bio: editBio.trim(),
+      }));
+
       setEditVisible(false);
-    } catch (err: any) {
-      Alert.alert("Error", err.message || "Could not save profile.");
+    } catch (err) {
+      console.log("Save profile error", err);
+      Alert.alert("Error", "Could not save profile.");
     } finally {
       setSaving(false);
     }
   };
 
-  const handleLogout = async () => {
-    try {
-      await signOut(auth);
-    } catch (err) {
-      console.log("Logout error", err);
-    }
-  };
-
   if (!user) {
     return (
-      <View style={styles.container}>
-        <Text style={{ color: "white" }}>Not logged in.</Text>
+      <View style={styles.centerContainer}>
+        <Text style={styles.centerText}>
+          You need to be logged in to see your profile.
+        </Text>
       </View>
     );
   }
 
+  if (loading) {
+    return (
+      <View style={styles.centerContainer}>
+        <ActivityIndicator size="large" color="#22c55e" />
+      </View>
+    );
+  }
+
+  const displayName = getSafeDisplayName(profile.username, user.email);
+  const avatarSeed = displayName || "player";
+
   return (
-    <>
+    <KeyboardAvoidingView
+      style={{ flex: 1, backgroundColor: "#050816" }}
+      behavior={Platform.OS === "ios" ? "padding" : undefined}
+    >
       <ScrollView
         style={styles.container}
         contentContainerStyle={{ paddingBottom: 40 }}
       >
         <Text style={styles.header}>Profile</Text>
 
-        {/* Top card with avatar + main info */}
-        <View style={styles.topCard}>
-          <Image
-            source={{
-              uri: `https://api.dicebear.com/9.x/thumbs/png?seed=${encodeURIComponent(
-                avatarSeed
-              )}`,
-            }}
-            style={styles.avatar}
-          />
+        {/* top card */}
+        <View style={styles.card}>
+          <View style={styles.topRow}>
+            <Image
+              source={{
+                uri: `https://api.dicebear.com/9.x/thumbs/png?seed=${encodeURIComponent(
+                  avatarSeed
+                )}`,
+              }}
+              style={styles.avatar}
+            />
+            <View style={{ flex: 1, marginLeft: 12 }}>
+              <Text style={styles.displayName}>{displayName}</Text>
+              {profile.platform ? (
+                <Text style={styles.platformText}>{profile.platform}</Text>
+              ) : (
+                <Text style={styles.platformTextMuted}>No platform set</Text>
+              )}
+            </View>
+            <TouchableOpacity
+              style={styles.editBtn}
+              onPress={() => setEditVisible(true)}
+            >
+              <Text style={styles.editBtnText}>Edit</Text>
+            </TouchableOpacity>
+          </View>
 
-          <Text style={styles.mainName}>
-            {username.trim() || user.email?.split("@")[0]}
-          </Text>
-          <Text style={styles.handle}>@{user.email}</Text>
-          {platform ? (
-            <Text style={styles.platformText}>{platform}</Text>
+          {profile.bio ? (
+            <Text style={styles.bioText}>{profile.bio}</Text>
           ) : (
-            <Text style={styles.platformTextMuted}>Add your platform</Text>
-          )}
-
-          {bio ? (
-            <Text style={styles.bioText}>{bio}</Text>
-          ) : (
-            <Text style={styles.bioPlaceholder}>
-              No bio yet. Tap Edit to add one.
+            <Text style={styles.bioTextMuted}>
+              Add a short bio so people know what you play.
             </Text>
           )}
+        </View>
 
+        {/* stats */}
+        <View style={styles.card}>
+          <Text style={styles.sectionTitle}>Stats</Text>
           <View style={styles.statsRow}>
             <View style={styles.statBox}>
-              <Text style={styles.statNumber}>{followersCount}</Text>
-              <Text style={styles.statLabel}>Followers</Text>
-            </View>
-            <View style={styles.statBox}>
-              <Text style={styles.statNumber}>{followingCount}</Text>
-              <Text style={styles.statLabel}>Following</Text>
-            </View>
-            <View style={styles.statBox}>
-              <Text style={styles.statNumber}>{clipCount}</Text>
+              <Text style={styles.statNumber}>{profile.clipCount}</Text>
               <Text style={styles.statLabel}>Clips</Text>
             </View>
             <View style={styles.statBox}>
-              <Text style={styles.statNumber}>{lfgCount}</Text>
-              <Text style={styles.statLabel}>LFG</Text>
+              <Text style={styles.statNumber}>{profile.lfgCount}</Text>
+              <Text style={styles.statLabel}>LFG posts</Text>
             </View>
             <View style={styles.statBox}>
-              <Text style={styles.statNumber}>{likesReceived}</Text>
-              <Text style={styles.statLabel}>Likes</Text>
+              <Text style={styles.statNumber}>{profile.followersCount}</Text>
+              <Text style={styles.statLabel}>Followers</Text>
+            </View>
+            <View style={styles.statBox}>
+              <Text style={styles.statNumber}>{profile.followingCount}</Text>
+              <Text style={styles.statLabel}>Following</Text>
             </View>
           </View>
+        </View>
 
-          <TouchableOpacity
-            style={styles.editBtn}
-            onPress={() => setEditVisible(true)}
-          >
-            <Text style={styles.editText}>Edit profile</Text>
-          </TouchableOpacity>
-
-          <TouchableOpacity style={styles.logoutBtn} onPress={handleLogout}>
-            <Text style={styles.logoutText}>Log out</Text>
-          </TouchableOpacity>
+        {/* extra info */}
+        <View style={styles.card}>
+          <Text style={styles.sectionTitle}>About</Text>
+          <View style={styles.infoRow}>
+            <Text style={styles.infoLabel}>Favorite game</Text>
+            <Text style={styles.infoValue}>
+              {profile.favoriteGame || "Not set"}
+            </Text>
+          </View>
+          <View style={styles.infoRow}>
+            <Text style={styles.infoLabel}>Region</Text>
+            <Text style={styles.infoValue}>
+              {profile.region || "Not set"}
+            </Text>
+          </View>
         </View>
       </ScrollView>
 
-      {/* Bottom sheet: edit profile */}
+      {/* Edit bottom sheet */}
       <BottomSheet
         visible={editVisible}
         onClose={() => setEditVisible(false)}
-        height={420}
+        height={460}
       >
         <Text style={styles.sheetTitle}>Edit profile</Text>
 
-        <Text style={styles.label}>Gamer tag</Text>
         <TextInput
           style={styles.input}
-          placeholder="Your gamer tag"
+          placeholder="Username (shown to others)"
           placeholderTextColor="#6b7280"
-          value={username}
-          onChangeText={setUsername}
+          value={editUsername}
+          onChangeText={setEditUsername}
         />
-
-        <Text style={styles.label}>Platform</Text>
         <TextInput
           style={styles.input}
-          placeholder="PC, PS5, Xbox..."
+          placeholder="Platform (PC, PS5, Xbox, etc.)"
           placeholderTextColor="#6b7280"
-          value={platform}
-          onChangeText={setPlatform}
+          value={editPlatform}
+          onChangeText={setEditPlatform}
         />
-
-        <Text style={styles.label}>Bio</Text>
         <TextInput
-          style={[styles.input, styles.bioInput]}
-          placeholder="Short bio about your playstyle, main games, etc."
+          style={styles.input}
+          placeholder="Favorite game"
           placeholderTextColor="#6b7280"
-          value={bio}
-          onChangeText={setBio}
+          value={editFavoriteGame}
+          onChangeText={setEditFavoriteGame}
+        />
+        <TextInput
+          style={styles.input}
+          placeholder="Region (e.g. NA East, EU)"
+          placeholderTextColor="#6b7280"
+          value={editRegion}
+          onChangeText={setEditRegion}
+        />
+        <TextInput
+          style={[styles.input, { height: 80 }]}
+          placeholder="Short bio"
+          placeholderTextColor="#6b7280"
           multiline
+          value={editBio}
+          onChangeText={setEditBio}
         />
 
         <TouchableOpacity
           style={[styles.saveBtn, saving && { opacity: 0.7 }]}
-          onPress={saveProfile}
+          onPress={handleSaveProfile}
           disabled={saving}
         >
-          <Text style={styles.saveText}>
+          <Text style={styles.saveBtnText}>
             {saving ? "Saving..." : "Save profile"}
           </Text>
         </TouchableOpacity>
       </BottomSheet>
-    </>
+    </KeyboardAvoidingView>
   );
 }
+
+// ---------- styles ----------
 
 const styles = StyleSheet.create({
   container: {
@@ -268,125 +391,134 @@ const styles = StyleSheet.create({
   },
   header: {
     color: "white",
-    fontSize: 24,
+    fontSize: 28,
     fontWeight: "bold",
-    marginBottom: 12,
-  },
-  topCard: {
-    backgroundColor: "#0b1120",
-    borderRadius: 16,
-    padding: 16,
-    alignItems: "center",
     marginBottom: 16,
   },
-  avatar: {
-    width: 96,
-    height: 96,
-    borderRadius: 48,
+  centerContainer: {
+    flex: 1,
+    backgroundColor: "#050816",
+    justifyContent: "center",
+    alignItems: "center",
+  },
+  centerText: {
+    color: "#e5e7eb",
+    fontSize: 16,
+    textAlign: "center",
+    paddingHorizontal: 24,
+  },
+  card: {
+    backgroundColor: "#111827",
+    borderRadius: 12,
+    padding: 14,
+    marginBottom: 14,
+  },
+  topRow: {
+    flexDirection: "row",
+    alignItems: "center",
     marginBottom: 10,
   },
-  mainName: {
+  avatar: {
+    width: 70,
+    height: 70,
+    borderRadius: 35,
+    backgroundColor: "#020617",
+  },
+  displayName: {
     color: "white",
     fontSize: 20,
     fontWeight: "bold",
   },
-  handle: {
+  platformText: {
     color: "#9ca3af",
     marginTop: 2,
   },
-  platformText: {
-    color: "#bbf7d0",
-    marginTop: 4,
-    fontWeight: "600",
-  },
   platformTextMuted: {
     color: "#6b7280",
-    marginTop: 4,
-  },
-  bioText: {
-    color: "#e5e7eb",
-    marginTop: 8,
-    textAlign: "center",
-  },
-  bioPlaceholder: {
-    color: "#6b7280",
-    marginTop: 8,
-    textAlign: "center",
-    fontStyle: "italic",
-  },
-  statsRow: {
-    flexDirection: "row",
-    justifyContent: "space-between",
-    marginTop: 14,
-    width: "100%",
-  },
-  statBox: {
-    flex: 1,
-    alignItems: "center",
-  },
-  statNumber: {
-    color: "white",
-    fontSize: 16,
-    fontWeight: "bold",
-  },
-  statLabel: {
-    color: "#9ca3af",
-    fontSize: 11,
+    marginTop: 2,
   },
   editBtn: {
-    marginTop: 14,
-    paddingVertical: 8,
-    paddingHorizontal: 24,
+    paddingHorizontal: 14,
+    paddingVertical: 6,
     borderRadius: 999,
     borderWidth: 1,
     borderColor: "#22c55e",
   },
-  editText: {
+  editBtnText: {
     color: "#22c55e",
     fontWeight: "600",
+    fontSize: 13,
   },
-  logoutBtn: {
-    marginTop: 10,
-    paddingVertical: 8,
-    paddingHorizontal: 24,
-    borderRadius: 999,
-    borderWidth: 1,
-    borderColor: "#ef4444",
+  bioText: {
+    color: "#e5e7eb",
+    fontSize: 14,
   },
-  logoutText: {
-    color: "#ef4444",
+  bioTextMuted: {
+    color: "#6b7280",
+    fontSize: 14,
+  },
+  sectionTitle: {
+    color: "white",
+    fontSize: 16,
     fontWeight: "600",
+    marginBottom: 8,
   },
+  statsRow: {
+    flexDirection: "row",
+    justifyContent: "space-between",
+  },
+  statBox: {
+    alignItems: "center",
+    flex: 1,
+  },
+  statNumber: {
+    color: "white",
+    fontSize: 18,
+    fontWeight: "bold",
+  },
+  statLabel: {
+    color: "#9ca3af",
+    fontSize: 12,
+  },
+  infoRow: {
+    flexDirection: "row",
+    justifyContent: "space-between",
+    paddingVertical: 6,
+  },
+  infoLabel: {
+    color: "#9ca3af",
+    fontSize: 13,
+  },
+  infoValue: {
+    color: "#e5e7eb",
+    fontSize: 13,
+  },
+  // bottom sheet
   sheetTitle: {
     color: "white",
     fontSize: 18,
     fontWeight: "600",
-    marginBottom: 12,
-  },
-  label: {
-    color: "#9ca3af",
-    marginTop: 8,
-    marginBottom: 4,
+    marginBottom: 10,
   },
   input: {
     backgroundColor: "#020617",
-    borderRadius: 10,
-    padding: 10,
+    borderRadius: 8,
+    paddingHorizontal: 10,
+    paddingVertical: 8,
     color: "white",
-  },
-  bioInput: {
-    minHeight: 70,
-    textAlignVertical: "top",
+    marginBottom: 8,
+    fontSize: 14,
   },
   saveBtn: {
+    marginTop: 4,
     backgroundColor: "#22c55e",
     paddingVertical: 10,
-    borderRadius: 10,
+    borderRadius: 8,
     alignItems: "center",
-    marginTop: 16,
   },
-  saveText: {
+  saveBtnText: {
     color: "#020617",
     fontWeight: "600",
+    fontSize: 15,
   },
 });
