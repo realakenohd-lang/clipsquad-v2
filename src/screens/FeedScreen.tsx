@@ -14,7 +14,6 @@ import {
   Platform,
   Alert,
 } from "react-native";
-import * as ImagePicker from "expo-image-picker";
 import {
   collection,
   addDoc,
@@ -31,13 +30,7 @@ import {
   where,
   setDoc,
 } from "firebase/firestore";
-import {
-  ref as storageRef,
-  uploadBytes,
-  getDownloadURL,
-} from "firebase/storage";
-
-import { db, auth, storage } from "../../firebaseConfig";
+import { db, auth } from "../../firebaseConfig";
 import BottomSheet from "../components/BottomSheet";
 
 type Clip = {
@@ -127,9 +120,6 @@ export default function FeedScreen() {
 
   const [createVisible, setCreateVisible] = useState(false);
 
-  // local image picked from device
-  const [localImageUri, setLocalImageUri] = useState<string | null>(null);
-
   const user = auth.currentUser;
 
   // Listen to clips in real time
@@ -159,36 +149,7 @@ export default function FeedScreen() {
     return unsub;
   }, []);
 
-  // ask permission for media library (native)
-  useEffect(() => {
-    (async () => {
-      const { status } =
-        await ImagePicker.requestMediaLibraryPermissionsAsync();
-      if (status !== "granted") {
-        console.log("Media library permission not granted");
-      }
-    })();
-  }, []);
-
-  const pickImageFromDevice = async () => {
-    try {
-      const result = await ImagePicker.launchImageLibraryAsync({
-        mediaTypes: ImagePicker.MediaTypeOptions.Images,
-        allowsEditing: true,
-        aspect: [16, 9],
-        quality: 0.8,
-      });
-
-      if (!result.canceled && result.assets && result.assets.length > 0) {
-        const uri = result.assets[0].uri;
-        setLocalImageUri(uri);
-      }
-    } catch (err) {
-      console.log("Image picker error", err);
-    }
-  };
-
-  // ---------- posting a clip, using profile username + optional upload ----------
+  // ---------- posting a clip, using profile username ----------
   const handlePost = async () => {
     if (!game || !title) {
       Alert.alert("Missing info", "Game and title are required.");
@@ -201,7 +162,11 @@ export default function FeedScreen() {
       return;
     }
 
-    // Get username from profile (users/{uid}.username)
+    const finalThumbnail =
+      thumbnail.trim() ||
+      "https://placehold.co/600x400/111827/FFFFFF?text=No+Thumbnail";
+
+    // get username from profile (users/{uid}.username)
     let profileUsername: string | null = null;
     try {
       const userRef = doc(db, "users", currentUser.uid);
@@ -210,6 +175,7 @@ export default function FeedScreen() {
         const data = snap.data() as any;
         if (data.username) profileUsername = data.username;
       } else {
+        // make sure user doc exists for follow system
         await setDoc(
           userRef,
           { email: currentUser.email ?? null, createdAt: new Date() },
@@ -225,38 +191,16 @@ export default function FeedScreen() {
       currentUser.email
     );
 
-    let finalThumbnail = thumbnail.trim(); // manual URL if user typed one
-
     try {
       setPosting(true);
-
-      // If user picked a local image, upload to Firebase Storage
-      if (localImageUri) {
-        const response = await fetch(localImageUri);
-        const blob = await response.blob();
-
-        const path = `thumbnails/${currentUser.uid}/${Date.now()}.jpg`;
-        const imgRef = storageRef(storage, path);
-
-        await uploadBytes(imgRef, blob);
-        const downloadURL = await getDownloadURL(imgRef);
-        finalThumbnail = downloadURL;
-      }
-
-      // fallback placeholder if nothing
-      if (!finalThumbnail) {
-        finalThumbnail =
-          "https://placehold.co/600x400/111827/FFFFFF?text=No+Thumbnail";
-      }
-
       await addDoc(collection(db, "clips"), {
         title: title.trim(),
         game: game.trim(),
         thumbnail: finalThumbnail,
         userId: currentUser.uid,
         userEmail: currentUser.email ?? null,
-        username: finalUsername,
-        user: finalUsername,
+        username: finalUsername, // profile username
+        user: finalUsername, // legacy field, but holds same display name
         createdAt: serverTimestamp(),
         likedBy: [],
       });
@@ -264,7 +208,6 @@ export default function FeedScreen() {
       setGame("");
       setTitle("");
       setThumbnail("");
-      setLocalImageUri(null);
       setCreateVisible(false);
     } catch (err: any) {
       console.log("Post error", err);
@@ -590,7 +533,7 @@ export default function FeedScreen() {
         <BottomSheet
           visible={createVisible}
           onClose={() => setCreateVisible(false)}
-          height={460}
+          height={420}
         >
           <Text style={styles.sheetTitle}>Post a clip</Text>
 
@@ -615,25 +558,6 @@ export default function FeedScreen() {
             value={thumbnail}
             onChangeText={setThumbnail}
           />
-
-          {/* Pick from device button */}
-          <TouchableOpacity
-            style={styles.pickBtn}
-            onPress={pickImageFromDevice}
-          >
-            <Text style={styles.pickBtnText}>
-              {localImageUri ? "Change image from device" : "Pick image from device"}
-            </Text>
-          </TouchableOpacity>
-
-          {/* Small preview if local image selected */}
-          {localImageUri && (
-            <Image
-              source={{ uri: localImageUri }}
-              style={styles.previewImage}
-              resizeMode="cover"
-            />
-          )}
 
           <TouchableOpacity
             style={[styles.postBtn, posting && { opacity: 0.7 }]}
@@ -860,27 +784,6 @@ const styles = StyleSheet.create({
   postBtnText: {
     color: "#020617",
     fontWeight: "600",
-  },
-  pickBtn: {
-    backgroundColor: "#1f2937",
-    paddingVertical: 10,
-    borderRadius: 8,
-    alignItems: "center",
-    marginBottom: 8,
-    borderWidth: 1,
-    borderColor: "#374151",
-  },
-  pickBtnText: {
-    color: "#e5e7eb",
-    fontSize: 13,
-    fontWeight: "500",
-  },
-  previewImage: {
-    width: "100%",
-    height: 120,
-    borderRadius: 8,
-    marginBottom: 8,
-    backgroundColor: "#020617",
   },
   card: {
     backgroundColor: "#111827",
