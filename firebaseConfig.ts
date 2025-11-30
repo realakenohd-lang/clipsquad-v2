@@ -1,0 +1,18 @@
+// firebaseConfig.ts
+import { initializeApp } from "firebase/app";
+import { getAuth } from "firebase/auth";
+import { getFirestore } from "firebase/firestore";
+
+const firebaseConfig = {
+  apiKey: "AIzaSyAyx4RgUj33UZqFPUEcEqvmSknQcEkfQag",
+  authDomain: "clipsquad-1b5a2.firebaseapp.com",
+  projectId: "clipsquad-1b5a2",
+  storageBucket: "clipsquad-1b5a2.appspot.com",
+  messagingSenderId: "186294550410",
+  appId: "1:186294550410:web:332e34ff93827ce23c1273",
+};
+
+const app = initializeApp(firebaseConfig);
+
+export const auth = getAuth(app);
+export const db = getFirestore(app);
