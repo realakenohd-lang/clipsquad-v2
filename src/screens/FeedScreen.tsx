@@ -236,7 +236,7 @@ export default function FeedScreen() {
     try {
       setCommentSending(true);
 
-      let username: string | null = currentUser.email;
+      let username: string | null = null;
       try {
         const ref = doc(db, "users", currentUser.uid);
         const snap = await getDoc(ref);
